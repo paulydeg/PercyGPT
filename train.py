@@ -21,6 +21,8 @@ import time
 import math
 import pickle
 from contextlib import nullcontext
+import csv
+from datetime import datetime
 
 import numpy as np
 import torch
@@ -191,6 +193,36 @@ if block_size < model.config.block_size:
     model.crop_block_size(block_size)
     model_args['block_size'] = block_size # so that the checkpoint will have the right value
 model.to(device)
+# ---- persistent experiment logging ----
+LOG_DIR = os.environ.get("NANOGPT_LOG_DIR", "/content/drive/MyDrive/nanogpt_logs")
+os.makedirs(LOG_DIR, exist_ok=True)
+
+run_id = os.environ.get("NANOGPT_RUN_ID", datetime.now().strftime("%Y%m%d_%H%M%S"))
+log_path = os.path.join(LOG_DIR, "experiments.csv")
+
+header = [
+    "run_id", "timestamp", "iter", "split",
+    "loss", "lr", "time_ms", "mfu",
+    "batch_size", "block_size", "n_layer", "n_head", "n_embd",
+    "window_size", "device", "dtype", "compile",
+    "out_dir"
+]
+
+if not os.path.exists(log_path):
+    with open(log_path, "w", newline="") as f:
+        csv.writer(f).writerow(header)
+
+def log_row(row_dict):
+    row = [row_dict.get(k, "") for k in header]
+    with open(log_path, "a", newline="") as f:
+        csv.writer(f).writerow(row)
+
+_probe = model.module if hasattr(model, "module") else model
+try:
+    window_size = _probe.transformer.h[0].attn.window_size
+except Exception:
+    window_size = ""
+# ---------------------------------------
 
 # initialize a GradScaler. If enabled=False scaler is a no-op
 scaler = torch.cuda.amp.GradScaler(enabled=(dtype == 'float16'))
@@ -325,6 +357,28 @@ while True:
             mfu = raw_model.estimate_mfu(batch_size * gradient_accumulation_steps, dt)
             running_mfu = mfu if running_mfu == -1.0 else 0.9*running_mfu + 0.1*mfu
         print(f"iter {iter_num}: loss {lossf:.4f}, time {dt*1000:.2f}ms, mfu {running_mfu*100:.2f}%")
+
+        log_row({
+          "run_id": run_id,
+          "timestamp": datetime.now().isoformat(),
+          "iter": iter_num,
+          "split": "train",
+          "loss": float(lossf),
+          "lr": float(lr),
+          "time_ms": float(dt * 1000),
+          "mfu": float(running_mfu),
+          "batch_size": batch_size,
+          "block_size": block_size,
+          "n_layer": n_layer,
+          "n_head": n_head,
+          "n_embd": n_embd,
+          "window_size": window_size,
+          "device": device,
+          "dtype": dtype,
+          "compile": compile,
+          "out_dir": out_dir,
+      })
+        
     iter_num += 1
     local_iter_num += 1
 
